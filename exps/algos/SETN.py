@@ -3,7 +3,7 @@
 ######################################################################################
 # One-Shot Neural Architecture Search via Self-Evaluated Template Network, ICCV 2019 #
 ######################################################################################
-import sys, time, random, argparse
+import sys, time, random, argparse, os
 import numpy as np
 from copy import deepcopy
 import torch
@@ -124,24 +124,25 @@ def valid_func(xloader, network, criterion):
   return arch_losses.avg, arch_top1.avg, arch_top5.avg
 
 
-def main(xargs):
+def main(xargs, myargs):
   assert torch.cuda.is_available(), 'CUDA is not available.'
   torch.backends.cudnn.enabled   = True
   torch.backends.cudnn.benchmark = False
   torch.backends.cudnn.deterministic = True
   torch.set_num_threads( xargs.workers )
   prepare_seed(xargs.rand_seed)
-  logger = prepare_logger(args)
+  logger = prepare_logger(xargs)
 
   train_data, valid_data, xshape, class_num = get_datasets(xargs.dataset, xargs.data_path, -1)
   config = load_config(xargs.config_path, {'class_num': class_num, 'xshape': xshape}, logger)
-  search_loader, _, valid_loader = get_nas_search_loaders(train_data, valid_data, xargs.dataset, 'configs/nas-benchmark/', \
-                                        (config.batch_size, config.test_batch_size), xargs.workers)
+  search_loader, _, valid_loader = get_nas_search_loaders(
+    train_data, valid_data, xargs.dataset, 'AutoDL-Projects/configs/nas-benchmark/',
+    (config.batch_size, config.test_batch_size), xargs.num_worker)
   logger.log('||||||| {:10s} ||||||| Search-Loader-Num={:}, Valid-Loader-Num={:}, batch size={:}'.format(xargs.dataset, len(search_loader), len(valid_loader), config.batch_size))
   logger.log('||||||| {:10s} ||||||| Config={:}'.format(xargs.dataset, config))
 
   search_space = get_search_spaces('cell', xargs.search_space_name)
-  if xargs.model_config is None:
+  if not hasattr(xargs, 'model_config') or xargs.model_config is None:
     model_config = dict2config(
       dict(name='SETN', C=xargs.channel, N=xargs.num_cells, max_nodes=xargs.max_nodes, num_classes=class_num,
            space=search_space, affine=False, track_running_stats=bool(xargs.track_running_stats)), None)
@@ -230,7 +231,7 @@ def main(xargs):
                 model_base_path, logger)
     last_info = save_checkpoint({
           'epoch': epoch + 1,
-          'args' : deepcopy(args),
+          'args' : deepcopy(xargs),
           'last_checkpoint': save_path,
           }, logger.path('info'), logger)
     with torch.no_grad():
@@ -256,7 +257,7 @@ def main(xargs):
   
 
 
-if __name__ == '__main__':
+def build_parser():
   parser = argparse.ArgumentParser("SETN")
   parser.add_argument('--data_path',          type=str,   help='Path to dataset')
   parser.add_argument('--dataset',            type=str,   choices=['cifar10', 'cifar100', 'ImageNet16-120'], help='Choose between Cifar10/100 and ImageNet-16.')
@@ -277,6 +278,29 @@ if __name__ == '__main__':
   parser.add_argument('--arch_nas_dataset',   type=str,   help='The path to load the architecture dataset (tiny-nas-benchmark).')
   parser.add_argument('--print_freq',         type=int,   help='print frequency (default: 200)')
   parser.add_argument('--rand_seed',          type=int,   help='manual seed')
+  return parser
+
+
+def run(argv_str=None):
+  from template_lib.utils.config import parse_args_and_setup_myargs, config2args
+  from template_lib.utils.modelarts_utils import prepare_dataset
+  run_script = os.path.relpath(__file__, os.getcwd())
+  args1, myargs, _ = parse_args_and_setup_myargs(argv_str, run_script=run_script, start_tb=False)
+  myargs.args = args1
+  myargs.config = getattr(myargs.config, args1.command)
+
+  if hasattr(myargs.config, 'datasets'):
+    prepare_dataset(myargs.config.datasets, cfg=myargs.config)
+
+  parser = build_parser()
   args = parser.parse_args()
   if args.rand_seed is None or args.rand_seed < 0: args.rand_seed = random.randint(1, 100000)
-  main(args)
+
+  args = config2args(config=myargs.config.args, args=args)
+  args.save_dir = os.path.join(args1.outdir, '201')
+  main(args, myargs)
+
+if __name__ == '__main__':
+  run()
+  from template_lib.examples import test_bash
+  test_bash.TestingUnit().test_resnet(gpu=os.environ['CUDA_VISIBLE_DEVICES'])
